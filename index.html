@@ -118,8 +118,17 @@
           <h3>📦 Live Packet Structure</h3>
           <span id="pdu-label-pill" class="pdu-label-pill" aria-label="Current PDU type">PDU: Data</span>
         </div>
-        <div id="packet-wrapper" role="img" aria-label="Packet encapsulation blocks">
+        <!-- New encapsulation wrap stage -->
+        <div id="packet-wrap-stage" role="img" aria-label="Packet encapsulation visualization">
+          <!-- Injected by renderPacketWrapStage() -->
+        </div>
+        <!-- Legacy flat block row (hidden; kept for binary-stream fallback) -->
+        <div id="packet-wrapper" style="display:none;" role="img" aria-label="Packet encapsulation blocks">
           <!-- Injected dynamically -->
+        </div>
+        <!-- Byte counter -->
+        <div id="packet-byte-counter" aria-label="Packet byte size breakdown">
+          <span class="byte-total">📦 — bytes</span>
         </div>
         <!-- Binary stream — Physical Layer only -->
         <div id="binary-stream-container" aria-label="Binary bit stream">
@@ -195,6 +204,27 @@
     </section><!-- #detail-stage -->
 
   </main>
+
+  <!-- =========================================================
+       NETWORK FLOW DIAGRAM PANEL (v3) — shown between composer and main
+       ========================================================= -->
+  <div id="network-flow-panel" role="img" aria-label="Animated network data flow">
+    <div class="nf-header">
+      <span class="nf-title">🌐 Network Data Flow</span>
+      <span class="nf-pill" id="nf-active-pill" style="color:var(--accent-primary);border-color:var(--accent-primary);">Layer 7 — Application</span>
+    </div>
+    <canvas id="network-flow-canvas" aria-label="Animated packet traveling through network nodes"></canvas>
+    <div class="nf-legend">
+      <div class="nf-node-legend" style="color:var(--accent-primary);"><div class="nf-dot"></div>Your PC</div>
+      <div class="nf-node-legend" style="color:#34d399;"><div class="nf-dot"></div>Switch</div>
+      <div class="nf-node-legend" style="color:#f87171;"><div class="nf-dot"></div>Router</div>
+      <div class="nf-node-legend" style="color:#f59e0b;"><div class="nf-dot"></div>Internet</div>
+      <div class="nf-node-legend" style="color:#a78bfa;"><div class="nf-dot"></div>Server</div>
+    </div>
+  </div>
+
+  <!-- PACKET INSPECTOR OVERLAY -->
+  <div class="pkt-inspector-overlay" id="pkt-inspector-overlay" aria-hidden="true"></div>
 
   <!-- =========================================================
        KEYBOARD HINT

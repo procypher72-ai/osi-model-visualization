@@ -745,77 +745,238 @@ function renderLayerStack() {
 
     if (idx === activeIdx) {
       card.classList.add('active');
-      card.querySelector('.layer-status-icon').textContent = '⚙';
-      card.querySelector('.layer-num').textContent = layerData.num;
+      card.querySelector('.tower-status').textContent = '⚙';
+      card.querySelector('.tower-num').textContent = layerData.num;
     } else if (isCompleted) {
       card.classList.add('completed');
-      card.querySelector('.layer-status-icon').textContent = '✓';
-      card.querySelector('.layer-num').textContent = '✓';
+      card.querySelector('.tower-status').textContent = '✓';
+      card.querySelector('.tower-num').textContent = '✓';
     } else {
       card.classList.add('pending');
-      card.querySelector('.layer-status-icon').textContent = '';
-      card.querySelector('.layer-num').textContent = layerData.num;
+      card.querySelector('.tower-status').textContent = '';
+      card.querySelector('.tower-num').textContent = layerData.num;
     }
   });
 }
 
 /* =============================================================================
-   RENDER — Packet Visualizer
+   RENDER — Packet Visualizer (v3 — encapsulation WRAP animation)
    ============================================================================= */
+
+/**
+ * Per-layer byte overhead constants (header/trailer sizes).
+ * sender: headers added top → bottom (L7→L1).
+ * receiver: those same headers stripped.
+ */
+const LAYER_OVERHEAD = {
+  7: { label: 'HTTP Req',   bytes: 0,  color: 'var(--layer-7-color)', detail: (j) => ({ 'Method': 'POST /send HTTP/1.1', 'Host': 'chat.example.com', 'Content-Type': 'text/plain; UTF-8', 'Content-Length': `${j.byteLen} bytes` }) },
+  6: { label: 'TLS Hdr',   bytes: 21, color: 'var(--layer-6-color)', detail: (j) => ({ 'TLS Version': '1.3', 'IV/Nonce': j.tlsIV, 'Auth Tag': j.tlsTag, 'Cipher': 'AES-256-GCM' }) },
+  5: { label: 'Session',   bytes: 36, color: 'var(--layer-5-color)', detail: (j) => ({ 'Session-ID': j.sessId, 'Duplex': 'Full', 'Bearer': 'verified ✓' }) },
+  4: { label: 'TCP Seg',   bytes: 20, color: 'var(--layer-4-color)', detail: (j) => ({ 'Src Port': j.srcPort, 'Dst Port': j.dstPort, 'Seq #': j.seqNum, 'Flags': 'PSH|ACK', 'Checksum': j.checksum }) },
+  3: { label: 'IP Hdr',    bytes: 20, color: 'var(--layer-3-color)', detail: (j) => ({ 'Src IP': j.srcIP, 'Dst IP': j.dstIP, 'TTL': 64, 'Protocol': 'TCP(6)', 'ID': j.ipId }) },
+  2: { label: 'ETH Frame', bytes: 18, color: 'var(--layer-2-color)', detail: (j) => ({ 'Src MAC': j.srcMAC, 'Dst MAC': j.dstMAC, 'EtherType': '0x0800', 'FCS CRC-32': j.crc32 }) },
+  1: { label: 'PHY Bits',  bytes: 0,  color: 'var(--layer-1-color)', detail: (j) => ({ 'Bit count': `${j.bitLen} bits`, 'Hex': j.hexStr.substring(0,20)+'…', 'Speed': '1 Gbps', 'Medium': 'Cat6 Ethernet' }) },
+};
+
 function renderPacketVisualizer(layer) {
-  const wrapper  = $('packet-wrapper');
   const binaryCt = $('binary-stream-container');
   const pduPill  = $('pdu-label-pill');
+  const wrapStage = $('packet-wrap-stage');
+  const byteCounter = $('packet-byte-counter');
 
   pduPill.textContent = `PDU: ${layer.pdu}`;
   pduPill.style.cssText = `border-color:${layer.color};color:${layer.color};`;
 
+  // Update the network flow pill
+  const nfPill = $('nf-active-pill');
+  if (nfPill) {
+    nfPill.textContent = `Layer ${layer.num} — ${layer.name}`;
+    nfPill.style.color = layer.color;
+    nfPill.style.borderColor = layer.color;
+  }
+
   // Physical layer → binary stream
   if (layer.num === 1) {
-    wrapper.innerHTML = `<span style="font-size:0.72rem;color:var(--text-muted);font-family:'JetBrains Mono',monospace;">
-      Raw bits on physical medium ↓</span>`;
     binaryCt.classList.add('active');
+    wrapStage.innerHTML = `<span style="font-size:0.72rem;color:var(--text-muted);font-family:'JetBrains Mono',monospace;">Raw bits on physical medium ↓</span>`;
     const stream = journey.binaryStr;
     $('binary-stream').innerHTML = stream.split('').map(c =>
       `<span class="binary-bit">${c}</span>`
     ).join('');
     animateBinaryBits();
+    byteCounter.innerHTML = `<span class="byte-total">⚡ ${journey.bitLen} bits transmitted</span><span class="byte-divider">·</span><span class="byte-seg-label">${journey.byteLen} bytes → wire</span>`;
     return;
   } else {
     binaryCt.classList.remove('active');
   }
 
-  const blocks = getPacketBlocks(layer.num, state.flowDirection);
-  if (!blocks) {
-    wrapper.innerHTML = `<span style="font-size:0.78rem;color:var(--text-muted);font-family:'JetBrains Mono',monospace;">
-      Converting to raw bits...</span>`;
-    return;
+  renderPacketWrapStage(layer);
+  renderByteCounter(layer);
+}
+
+/**
+ * Renders the new encapsulation wrap animation.
+ * Sender: layers accumulate as nested bands (bottom payload = message, outer bands = headers).
+ * Receiver: bands are shown as "stripping" / faded.
+ */
+function renderPacketWrapStage(layer) {
+  const wrapStage = $('packet-wrap-stage');
+  if (!wrapStage) return;
+  const isSender = state.flowDirection === 'sender';
+  const layerNum = layer.num;
+  const j = journey;
+  const shortMsg = j.raw.length > 12 ? j.raw.substring(0, 12) + '…' : j.raw;
+
+  // Determine which layers are visible at this step
+  // Sender: layers 7 down to current are shown (newest outer band first)
+  // Receiver: layers 1 up to current are shown (currently stripping newest)
+
+  let bands = [];
+  if (isSender) {
+    // Layers from L7 down to current layer
+    // In OSI_LAYERS array: index 0 = L7, index 6 = L1
+    // Current layer is layer.num. Show all from 7 down to layerNum.
+    for (let n = 7; n >= layerNum; n--) {
+      const info = LAYER_OVERHEAD[n];
+      const isNew = n === layerNum;
+      bands.push({ num: n, info, isNew, stripping: false });
+    }
+  } else {
+    // Receiver: layers from L1 up to current layer
+    // Show layers 1..layerNum. The current one is being stripped.
+    for (let n = 1; n <= layerNum; n++) {
+      const info = LAYER_OVERHEAD[n];
+      const isStripping = n === layerNum;
+      bands.push({ num: n, info, isNew: false, stripping: isStripping });
+    }
+    bands.reverse(); // outermost (highest layer processed so far) first
   }
 
-  wrapper.innerHTML = '';
-  blocks.forEach((block, i) => {
-    const el = document.createElement('div');
-    if (block.type === 'sep') {
-      el.style.cssText = 'color:var(--border-mid);font-size:1.2rem;align-self:center;padding:0 2px;font-weight:300;';
-      el.textContent = block.label;
-      wrapper.appendChild(el);
+  wrapStage.innerHTML = '';
+  const stack = document.createElement('div');
+  stack.className = 'enc-stack';
+
+  bands.forEach((band, i) => {
+    if (band.num === 7 && isSender) {
+      // Application layer = payload only
+      const payload = document.createElement('div');
+      payload.className = 'enc-payload';
+      payload.textContent = `"${shortMsg}"`;
+      stack.appendChild(payload);
       return;
     }
 
-    el.className = `packet-block ${block.type}`;
-    if (block.isNew) el.classList.add('new-block');
+    const div = document.createElement('div');
+    div.className = 'enc-band';
+    if (band.isNew) div.classList.add('new-band');
+    if (band.stripping) div.classList.add('stripping');
 
-    const colorRef = block.colorVar === '--accent-primary'
-      ? 'var(--accent-primary)'
-      : `var(${block.colorVar})`;
+    const color = band.info.color;
+    div.style.borderColor = `color-mix(in srgb, ${color} 45%, transparent)`;
+    div.style.backgroundColor = `color-mix(in srgb, ${color} 6%, transparent)`;
+    div.style.animationDelay = `${i * 35}ms`;
 
-    el.style.background = `color-mix(in srgb, ${colorRef} 14%, transparent)`;
-    el.style.borderColor = colorRef;
-    el.style.color = colorRef;
-    el.style.animationDelay = `${i * 45}ms`;
-    el.textContent = block.label;
-    wrapper.appendChild(el);
+    // Header label (left side)
+    const labelEl = document.createElement('span');
+    labelEl.className = 'enc-band-label';
+    labelEl.style.color = color;
+    labelEl.style.background = `color-mix(in srgb, ${color} 12%, transparent)`;
+    labelEl.textContent = band.info.label;
+    div.appendChild(labelEl);
+
+    // Inner content area
+    const inner = document.createElement('div');
+    inner.className = 'enc-band-inner';
+    if (i === bands.length - 1 && !isSender) {
+      // Bottom of receiver stack = original message emerging
+      inner.textContent = `"${shortMsg}" ← decrypted payload`;
+      inner.style.color = 'var(--accent-primary)';
+    } else if (band.num === 7) {
+      inner.textContent = `"${shortMsg}"`;
+    } else if (band.num === 1) {
+      inner.textContent = `${journey.bitLen} bits on wire`;
+    } else if (band.num === 2) {
+      inner.textContent = `MAC ${journey.srcMAC.substring(0,8)}… → ${journey.dstMAC.substring(0,8)}… | FCS ${journey.crc32.substring(0,8)}…`;
+    } else if (band.num === 3) {
+      inner.textContent = `${journey.srcIP} → ${journey.dstIP} | TTL:64`;
+    } else if (band.num === 4) {
+      inner.textContent = `TCP ${journey.srcPort}→${journey.dstPort} | Seq:${journey.seqNum} | PSH+ACK`;
+    } else if (band.num === 5) {
+      inner.textContent = `Session-ID: ${journey.sessId.substring(0,8)}…`;
+    } else if (band.num === 6) {
+      inner.textContent = `TLS-IV:${journey.tlsIV.substring(0,8)}… | AES-256-GCM`;
+    } else {
+      inner.textContent = band.isNew ? '[wrapped]' : '[payload]';
+    }
+    div.appendChild(inner);
+
+    // Click to inspect
+    div.classList.add('clickable');
+    div.addEventListener('click', (e) => openPacketInspector(e, band.num, band.info, color));
+
+    stack.appendChild(div);
+
+    // For receiver, place the payload at the bottom
+    if (!isSender && i === bands.length - 1) {
+      const payload = document.createElement('div');
+      payload.className = 'enc-payload';
+      payload.textContent = layerNum === 7 ? `🎉 "${journey.raw}" — delivered!` : `"${shortMsg}" [encrypted]`;
+      stack.appendChild(payload);
+    }
   });
+
+  // For sender: add payload inside innermost band
+  if (isSender && layerNum !== 7) {
+    const payNote = document.createElement('div');
+    payNote.style.cssText = 'font-size:0.6rem;color:var(--text-muted);font-family:"JetBrains Mono",monospace;margin-top:4px;text-align:center;';
+    payNote.textContent = `↑ click any band to inspect header fields`;
+    wrapStage.appendChild(stack);
+    wrapStage.appendChild(payNote);
+    return;
+  }
+
+  wrapStage.appendChild(stack);
+}
+
+/** Renders the byte counter breakdown */
+function renderByteCounter(layer) {
+  const counter = $('packet-byte-counter');
+  if (!counter) return;
+  const isSender = state.flowDirection === 'sender';
+  const j = journey;
+  const layerNum = layer.num;
+
+  // Compute total overhead so far
+  let payloadBytes = j.byteLen;
+  let headerBytes = 0;
+  let segments = [];
+
+  if (isSender) {
+    // Accumulate overhead from L7 down to current layer
+    segments.push({ label: 'Payload', bytes: payloadBytes, color: 'var(--accent-primary)' });
+    for (let n = 6; n >= layerNum; n--) {
+      const oh = LAYER_OVERHEAD[n].bytes;
+      if (oh > 0) {
+        headerBytes += oh;
+        segments.push({ label: LAYER_OVERHEAD[n].label, bytes: oh, color: LAYER_OVERHEAD[n].color });
+      }
+    }
+  } else {
+    // Receiver: show bytes being stripped
+    for (let n = 1; n <= layerNum; n++) {
+      const oh = LAYER_OVERHEAD[n].bytes;
+      if (oh > 0) headerBytes += oh;
+    }
+    payloadBytes = j.byteLen + Object.values(LAYER_OVERHEAD).reduce((s, v) => s + v.bytes, 0) - headerBytes;
+    segments.push({ label: 'Remaining', bytes: payloadBytes, color: 'var(--accent-primary)' });
+  }
+
+  const total = payloadBytes + headerBytes;
+  counter.innerHTML = [
+    segments.map(s => `<span class="byte-seg"><span class="byte-seg-color" style="background:${s.color};"></span><span class="byte-seg-label">${s.label}</span> <span class="byte-seg-val">${s.bytes}B</span></span>`).join('<span class="byte-divider">+</span>'),
+    `<span class="byte-divider">=</span>`,
+    `<span class="byte-total">${total}B total</span>`
+  ].join('');
 }
 
 /** Animate bits lighting up sequentially */
@@ -1065,44 +1226,272 @@ function applyMessage() {
 }
 
 /* =============================================================================
-   BUILD LAYER STACK — called once on init
+   PACKET INSPECTOR POPOVER
+   ============================================================================= */
+let _inspectorActive = false;
+
+function openPacketInspector(event, layerNum, info, color) {
+  event.stopPropagation();
+  const overlay = $('pkt-inspector-overlay');
+  if (!overlay) return;
+  _inspectorActive = true;
+
+  const fields = info.detail ? info.detail(journey) : {};
+  const rows = Object.entries(fields).map(([k, v]) =>
+    `<div class="pki-row"><span class="pki-key">${k}</span><span class="pki-val" style="color:${color}">${v}</span></div>`
+  ).join('');
+
+  overlay.innerHTML = `
+    <div class="pkt-inspector-popover" id="pki-popover" style="border-top:3px solid ${color};">
+      <div class="pki-header">
+        <span class="pki-title" style="color:${color}">${info.label} — ${layerNum > 1 ? info.bytes + 'B overhead' : 'Physical'}</span>
+        <button class="pki-close" onclick="closePacketInspector()" aria-label="Close">✕</button>
+      </div>
+      <div class="pki-fields">${rows}</div>
+    </div>
+  `;
+  overlay.style.pointerEvents = 'none';
+
+  // Position near click
+  const pop = overlay.querySelector('#pki-popover');
+  pop.style.position = 'fixed';
+  const rect = event.target.getBoundingClientRect();
+  let top = rect.bottom + 8;
+  let left = rect.left;
+  if (left + 340 > window.innerWidth) left = window.innerWidth - 350;
+  if (top + 300 > window.innerHeight) top = rect.top - 300;
+  pop.style.top = `${top}px`;
+  pop.style.left = `${left}px`;
+  pop.style.pointerEvents = 'all';
+
+  overlay.setAttribute('aria-hidden', 'false');
+}
+
+function closePacketInspector() {
+  const overlay = $('pkt-inspector-overlay');
+  if (overlay) { overlay.innerHTML = ''; overlay.setAttribute('aria-hidden', 'true'); }
+  _inspectorActive = false;
+}
+
+/* =============================================================================
+   ANIMATED NETWORK FLOW — Canvas-based animation
+   Renders a miniature network topology and animates a packet traversing it
+   based on which OSI layer is active.
+   ============================================================================= */
+let _nfAnimFrame = null;
+let _nfPacketPos = 0;   // 0.0 – 1.0 progress along the path
+let _nfLastLayer = -1;
+
+// Network topology nodes: [id, labelEmoji, x-fraction, y-fraction, color, description]
+const NF_NODES = [
+  { id: 'pc',      emoji: '💻', xf: 0.05, yf: 0.5, color: '#38bdf8', label: 'Your PC'   },
+  { id: 'switch',  emoji: '🔀', xf: 0.28, yf: 0.5, color: '#34d399', label: 'Switch'    },
+  { id: 'router',  emoji: '🌐', xf: 0.50, yf: 0.5, color: '#f87171', label: 'Router'    },
+  { id: 'internet',emoji: '☁️', xf: 0.72, yf: 0.5, color: '#f59e0b', label: 'Internet'  },
+  { id: 'server',  emoji: '🖥️', xf: 0.95, yf: 0.5, color: '#a78bfa', label: 'Server'    },
+];
+
+// How far along the path the active packet is for each OSI layer
+const LAYER_PACKET_POS = { 7: 0.0, 6: 0.05, 5: 0.1, 4: 0.2, 3: 0.5, 2: 0.3, 1: 0.45 };
+
+function initNetworkFlowCanvas() {
+  const canvas = $('network-flow-canvas');
+  if (!canvas) return;
+
+  // Set physical pixel size for sharpness
+  function resizeCanvas() {
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * window.devicePixelRatio;
+    canvas.height = rect.height * window.devicePixelRatio;
+  }
+  resizeCanvas();
+  window.addEventListener('resize', resizeCanvas);
+
+  function drawFrame(timestamp) {
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width;
+    const H = canvas.height;
+    const dpr = window.devicePixelRatio;
+
+    ctx.clearRect(0, 0, W, H);
+
+    const layer = getCurrentLayer();
+    const layerColor = layer.color;
+    const targetPos = LAYER_PACKET_POS[layer.num] ?? 0;
+
+    // Smoothly move packet toward target position
+    const speed = 0.012;
+    if (Math.abs(_nfPacketPos - targetPos) > 0.005) {
+      _nfPacketPos += (_nfPacketPos < targetPos ? 1 : -1) * speed;
+    } else {
+      _nfPacketPos = targetPos;
+    }
+
+    // ─── Draw connections ───
+    ctx.lineWidth = 2 * dpr;
+    NF_NODES.forEach((node, i) => {
+      if (i === 0) return;
+      const prev = NF_NODES[i - 1];
+      const x1 = prev.xf * W;
+      const y1 = prev.yf * H;
+      const x2 = node.xf * W;
+      const y2 = node.yf * H;
+
+      // Gradient line
+      const grad = ctx.createLinearGradient(x1, y1, x2, y2);
+      grad.addColorStop(0, prev.color + '55');
+      grad.addColorStop(1, node.color + '55');
+      ctx.strokeStyle = grad;
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
+    });
+
+    // ─── Active connection glow (the active segment) ───
+    const activeNodeIdx = Math.min(Math.floor(_nfPacketPos * (NF_NODES.length - 1)), NF_NODES.length - 2);
+    if (activeNodeIdx >= 0 && activeNodeIdx < NF_NODES.length - 1) {
+      const n1 = NF_NODES[activeNodeIdx];
+      const n2 = NF_NODES[activeNodeIdx + 1];
+      ctx.lineWidth = 3 * dpr;
+      ctx.strokeStyle = layerColor + 'aa';
+      ctx.shadowColor = layerColor;
+      ctx.shadowBlur = 12 * dpr;
+      ctx.beginPath();
+      ctx.moveTo(n1.xf * W, n1.yf * H);
+      ctx.lineTo(n2.xf * W, n2.yf * H);
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
+
+    // ─── Draw nodes ───
+    NF_NODES.forEach((node, i) => {
+      const x = node.xf * W;
+      const y = node.yf * H;
+      const r = 18 * dpr;
+
+      // Outer glow for active nodes
+      const isActiveNode = Math.round(_nfPacketPos * (NF_NODES.length - 1)) === i;
+      if (isActiveNode) {
+        ctx.beginPath();
+        ctx.arc(x, y, r * 1.5, 0, Math.PI * 2);
+        ctx.fillStyle = layerColor + '22';
+        ctx.fill();
+      }
+
+      // Node circle
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fillStyle = '#0f1420';
+      ctx.fill();
+      ctx.lineWidth = (isActiveNode ? 2.5 : 1.5) * dpr;
+      ctx.strokeStyle = isActiveNode ? layerColor : node.color + '66';
+      if (isActiveNode) { ctx.shadowColor = layerColor; ctx.shadowBlur = 10 * dpr; }
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+
+      // Emoji icon
+      ctx.font = `${14 * dpr}px serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(node.emoji, x, y);
+
+      // Label below node
+      ctx.font = `${7.5 * dpr}px 'JetBrains Mono', monospace`;
+      ctx.fillStyle = isActiveNode ? layerColor : node.color + 'aa';
+      ctx.textBaseline = 'top';
+      ctx.fillText(node.label, x, y + r + 3 * dpr);
+    });
+
+    // ─── Draw the travelling packet dot ───
+    const totalPath = NF_NODES.length - 1;
+    const seg = Math.min(_nfPacketPos * totalPath, totalPath - 0.001);
+    const segIdx = Math.floor(seg);
+    const segFrac = seg - segIdx;
+    const pn1 = NF_NODES[segIdx];
+    const pn2 = NF_NODES[segIdx + 1];
+    const px = (pn1.xf + (pn2.xf - pn1.xf) * segFrac) * W;
+    const py = (pn1.yf + (pn2.yf - pn1.yf) * segFrac) * H;
+    const pr = 7 * dpr;
+
+    // Outer glow ring
+    const pulseScale = 1 + 0.3 * Math.sin(timestamp / 300);
+    ctx.beginPath();
+    ctx.arc(px, py, pr * pulseScale * 1.6, 0, Math.PI * 2);
+    ctx.fillStyle = layerColor + '28';
+    ctx.fill();
+
+    // Main dot
+    ctx.beginPath();
+    ctx.arc(px, py, pr, 0, Math.PI * 2);
+    ctx.fillStyle = layerColor;
+    ctx.shadowColor = layerColor;
+    ctx.shadowBlur = 14 * dpr;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // Packet label '📦'
+    ctx.font = `${9 * dpr}px serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillStyle = '#fff';
+    ctx.shadowColor = 'transparent';
+    ctx.fillText('📦', px, py - pr - 2 * dpr);
+
+    _nfAnimFrame = requestAnimationFrame(drawFrame);
+  }
+
+  if (_nfAnimFrame) cancelAnimationFrame(_nfAnimFrame);
+  _nfAnimFrame = requestAnimationFrame(drawFrame);
+}
+
+/* =============================================================================
+   BUILD LAYER STACK — v3: 3D Tower
    ============================================================================= */
 function buildLayerStack() {
   const container = $('layer-stack-panel');
   container.innerHTML = '';
 
+  // Wrapper
+  const wrap = document.createElement('div');
+  wrap.id = 'layer-tower-wrap';
+
+  // Spine connector
+  const spine = document.createElement('div');
+  spine.className = 'tower-spine';
+  wrap.appendChild(spine);
+
   // Flow label
   const flowLabel = document.createElement('div');
-  flowLabel.className = 'stack-flow-label';
+  flowLabel.className = 'tower-flow-label';
   flowLabel.id = 'stack-flow-label';
   flowLabel.textContent = '▼ Sender: Encapsulation (7→1)';
-  container.appendChild(flowLabel);
+  wrap.appendChild(flowLabel);
 
   OSI_LAYERS.forEach((layer, idx) => {
     if (idx > 0) {
-      const arrow = document.createElement('div');
-      arrow.className = 'direction-arrow down';
-      arrow.textContent = '↕';
-      container.appendChild(arrow);
+      const conn = document.createElement('div');
+      conn.className = 'tower-connector';
+      wrap.appendChild(conn);
     }
 
     const card = document.createElement('div');
-    card.className = 'layer-card pending';
+    card.className = 'tower-block pending';
     card.dataset.layer = layer.num;
-    card.style.setProperty('--layer-color', layer.color);
+    card.style.setProperty('--tower-color', layer.color);
     card.setAttribute('role', 'button');
     card.setAttribute('tabindex', '0');
     card.setAttribute('aria-label', `Jump to Layer ${layer.num}: ${layer.name}`);
     card.innerHTML = `
-      <div class="layer-num">${layer.num}</div>
-      <div class="layer-info">
-        <div class="layer-name">${layer.name}</div>
-        <div class="layer-pdu">PDU: ${layer.pdu}</div>
-        <div class="layer-protocols">
-          ${layer.protocols.slice(0, 4).map(p => `<span class="proto-tag">${p}</span>`).join('')}
+      <div class="tower-num">${layer.num}</div>
+      <div class="tower-info">
+        <div class="tower-name">${layer.name}</div>
+        <div class="tower-pdu">PDU: ${layer.pdu}</div>
+        <div class="tower-protos">
+          ${layer.protocols.slice(0, 3).map(p => `<span class="tower-proto-tag">${p}</span>`).join('')}
         </div>
       </div>
-      <div class="layer-status-icon"></div>
+      <div class="tower-status"></div>
     `;
 
     card.addEventListener('click', () => {
@@ -1113,8 +1502,10 @@ function buildLayerStack() {
     });
     card.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') card.click(); });
 
-    container.appendChild(card);
+    wrap.appendChild(card);
   });
+
+  container.appendChild(wrap);
 }
 
 /* =============================================================================
@@ -1200,6 +1591,13 @@ function renderSandboxSummary() {
 function init() {
   buildLayerStack();
   initEventListeners();
+  initNetworkFlowCanvas();
+  // Close inspector when clicking outside
+  document.addEventListener('click', (e) => {
+    if (_inspectorActive && !e.target.closest('.pkt-inspector-popover') && !e.target.closest('.enc-band')) {
+      closePacketInspector();
+    }
+  });
   render();
 }
 
