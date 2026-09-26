@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Interactive OSI Model Visualizer — Type a real message and watch it travel through all 7 OSI layers in real time. See actual HTTP headers, encryption, TCP segments, IP packets, MAC frames, and binary bits." />
+  <meta name="keywords" content="OSI Model, Network Layers, Data Encapsulation, TCP/IP, Computer Networks, Educational, Interactive, Real Example" />
+  <meta name="author" content="Antigravity" />
+  <title>Interactive OSI Model Visualizer | Real Message Journey</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+</head>
+<body>
+
+  <!-- =========================================================
+       PROGRESS BAR
+       ========================================================= -->
+  <div id="progress-bar-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-label="OSI layer progress">
+    <div id="progress-bar-fill"></div>
+  </div>
+
+  <!-- =========================================================
+       HEADER / CONTROL BAR
+       ========================================================= -->
+  <header id="app-header" role="banner">
+
+    <div class="header-brand">
+      <div class="logo-icon" aria-hidden="true">🔗</div>
+      <h1>OSI Model Visualizer</h1>
+    </div>
+
+    <!-- Flow Direction Toggle -->
+    <div class="flow-toggle" role="group" aria-label="Data flow direction">
+      <button class="flow-toggle-btn active" data-flow="sender" id="btn-flow-sender" aria-pressed="true"
+        title="Encapsulation: watch your message get wrapped in headers, Layer 7 → Layer 1">
+        ↓ Sender (7→1)
+      </button>
+      <button class="flow-toggle-btn" data-flow="receiver" id="btn-flow-receiver" aria-pressed="false"
+        title="Decapsulation: watch headers get stripped, Layer 1 → Layer 7">
+        ↑ Receiver (1→7)
+      </button>
+    </div>
+
+    <!-- Navigation Controls -->
+    <nav class="header-controls" role="navigation" aria-label="Step navigation">
+      <button class="ctrl-btn" id="btn-prev" aria-label="Previous layer" data-tooltip="← Arrow Key">◀ Prev</button>
+      <button class="ctrl-btn primary" id="btn-auto" aria-label="Auto-play all layers">▶ Auto-Play</button>
+      <button class="ctrl-btn" id="btn-next" aria-label="Next layer" data-tooltip="→ Arrow Key">Next ▶</button>
+      <button class="ctrl-btn danger" id="btn-reset" aria-label="Reset" data-tooltip="R Key">↺</button>
+    </nav>
+
+    <!-- Step Indicator -->
+    <div id="step-indicator" aria-live="polite" aria-atomic="true">↓ Sender · Step 1/7 · Application</div>
+
+  </header>
+
+  <!-- =========================================================
+       MESSAGE COMPOSER BAR (NEW)
+       The central input where the user types their message.
+       This drives ALL visualizations — everything shown is
+       derived from this real message.
+       ========================================================= -->
+  <div id="composer-bar" role="search" aria-label="Message composer">
+
+    <div class="composer-left">
+      <span class="composer-icon" aria-hidden="true">✉️</span>
+      <div class="composer-input-group">
+        <label for="live-msg-input" class="composer-label">Your Message:</label>
+        <input
+          type="text"
+          id="live-msg-input"
+          value="Hello, World!"
+          placeholder="Type any message to see its real OSI journey…"
+          maxlength="60"
+          aria-label="Type a message to trace through the OSI layers"
+          autocomplete="off"
+          spellcheck="false"
+        />
+      </div>
+      <button id="btn-apply-msg" class="ctrl-btn primary composer-send-btn" aria-label="Apply message and trace through OSI layers">
+        🚀 Trace Message
+      </button>
+    </div>
+
+    <div class="composer-right">
+      <!-- Shows the current active message -->
+      <div class="composer-active-msg">
+        <span class="composer-active-label">Tracing:</span>
+        <span id="composer-display-msg" class="composer-active-value">"Hello, World!"</span>
+      </div>
+
+      <!-- Open Full Journey overlay -->
+      <button id="btn-full-journey" class="ctrl-btn journey-btn" aria-label="Open full journey view — see both sender and receiver side by side"
+        data-tooltip="J Key">
+        📺 Full Journey View
+      </button>
+    </div>
+
+  </div>
+
+  <!-- =========================================================
+       MAIN CONTENT — Split Screen
+       ========================================================= -->
+  <main id="app-main" role="main">
+
+    <!-- LEFT PANEL — 7-Layer Stack -->
+    <aside id="layer-stack-panel" role="complementary" aria-label="OSI Layer Stack — click any layer to jump to it">
+      <!-- Injected by script.js → buildLayerStack() -->
+    </aside>
+
+    <!-- RIGHT PANEL — Detail Stage -->
+    <section id="detail-stage" aria-label="Layer detail and packet visualizer">
+
+      <!-- PACKET VISUALIZER -->
+      <article id="packet-visualizer" aria-label="Live packet structure visualization">
+        <div class="packet-viz-header">
+          <h3>📦 Live Packet Structure</h3>
+          <span id="pdu-label-pill" class="pdu-label-pill" aria-label="Current PDU type">PDU: Data</span>
+        </div>
+        <div id="packet-wrapper" role="img" aria-label="Packet encapsulation blocks">
+          <!-- Injected dynamically -->
+        </div>
+        <!-- Binary stream — Physical Layer only -->
+        <div id="binary-stream-container" aria-label="Binary bit stream">
+          <div class="binary-stream-label">⚡ Transmitted Bit Stream — your message as raw bits on the wire:</div>
+          <div id="binary-stream" aria-label="Binary representation"></div>
+        </div>
+      </article>
+
+      <!-- ★ NEW: MESSAGE AT THIS LAYER — shows real message transformation -->
+      <article id="msg-at-layer" aria-label="Your message at this OSI layer">
+        <div id="msg-at-layer-box">
+          <!-- Injected by renderMessageAtLayer() -->
+        </div>
+      </article>
+
+      <!-- LAYER DETAIL CARD -->
+      <div id="layer-detail-card" class="content-fade">
+
+        <!-- Main Detail -->
+        <div class="detail-main">
+
+          <div class="detail-layer-header">
+            <div class="detail-badge" id="detail-badge">
+              <span class="badge-num">L7</span>
+              <span class="badge-icon">🌐</span>
+            </div>
+            <div class="detail-title-group">
+              <h2 id="detail-layer-title" style="color: var(--layer-7-color);">Application Layer</h2>
+              <div class="detail-subtitle" id="detail-layer-subtitle">Layer 7 · PDU: Data / Message</div>
+            </div>
+          </div>
+
+          <!-- What Happens -->
+          <div class="info-section">
+            <div class="info-section-label">
+              <span class="label-dot" style="background: var(--accent-primary);"></span>
+              What happens at this layer?
+            </div>
+            <ul class="bullet-list" id="what-happens-list" aria-label="Layer functions"></ul>
+          </div>
+
+          <!-- Analogy -->
+          <div class="info-section">
+            <div class="info-section-label">
+              <span class="label-dot" style="background: var(--accent-purple);"></span>
+              Real-World Analogy
+            </div>
+            <blockquote class="analogy-box" id="analogy-text"></blockquote>
+          </div>
+
+          <!-- Devices -->
+          <div class="info-section">
+            <div class="info-section-label">
+              <span class="label-dot" style="background: #34d399;"></span>
+              Hardware / Devices Involved
+            </div>
+            <div class="device-chips" id="devices-list"></div>
+          </div>
+
+        </div>
+
+        <!-- Visual Panel -->
+        <div class="detail-visual">
+          <figure id="layer-svg-diagram" aria-label="Layer diagram"></figure>
+          <div class="quick-facts-card">
+            <div class="quick-facts-header">Quick Reference</div>
+            <div id="quick-facts-body"></div>
+          </div>
+        </div>
+
+      </div><!-- #layer-detail-card -->
+
+    </section><!-- #detail-stage -->
+
+  </main>
+
+  <!-- =========================================================
+       KEYBOARD HINT
+       ========================================================= -->
+  <div id="kbd-hint" aria-hidden="true">
+    <span class="kbd-key">←</span><span class="kbd-key">→</span> Navigate
+    <span style="margin:0 8px;color:var(--border-mid)">|</span>
+    <span class="kbd-key">Space</span> Auto-play
+    <span style="margin:0 8px;color:var(--border-mid)">|</span>
+    <span class="kbd-key">J</span> Full Journey
+    <span style="margin:0 8px;color:var(--border-mid)">|</span>
+    <span class="kbd-key">R</span> Reset
+  </div>
+
+  <!-- =========================================================
+       SANDBOX TOGGLE BAR
+       ========================================================= -->
+  <div id="sandbox-toggle-bar" role="button" tabindex="0" aria-expanded="false" aria-controls="sandbox-drawer"
+    aria-label="Toggle journey summary drawer"
+    onkeydown="if(event.key==='Enter'||event.key===' ')this.click()">
+    <span class="toggle-chevron">▲</span>
+    <span id="drawer-toggle-text">⬆ View Complete Journey Summary (All Layers at Once)</span>
+    <span class="toggle-chevron">▲</span>
+  </div>
+
+  <!-- =========================================================
+       SANDBOX DRAWER — shows all-layer summary
+       ========================================================= -->
+  <aside id="sandbox-drawer" role="complementary" aria-label="Journey summary for all layers">
+
+    <div class="sandbox-col">
+      <div class="sandbox-col-title">📡 Mock Network Addresses</div>
+      <div class="sandbox-network-info">
+        <div class="ni-box"><label>Source IP (L3)</label><span id="ni-src-ip">—</span></div>
+        <div class="ni-box"><label>Destination IP (L3)</label><span id="ni-dst-ip">—</span></div>
+        <div class="ni-box"><label>Source MAC (L2)</label><span id="ni-src-mac">—</span></div>
+        <div class="ni-box"><label>Destination MAC (L2)</label><span id="ni-dst-mac">—</span></div>
+      </div>
+      <div class="sandbox-col-title" style="margin-top:8px;">ℹ️ How to use</div>
+      <div style="font-size:0.78rem;color:var(--text-secondary);line-height:1.7;">
+        1. Type your message above and click <strong style="color:var(--accent-primary)">🚀 Trace Message</strong><br/>
+        2. Step through each layer with <strong>← →</strong> keys or Auto-Play<br/>
+        3. See the <strong>"Your message at this layer"</strong> code block for real data<br/>
+        4. Click <strong style="color:var(--accent-primary)">📺 Full Journey View</strong> for the complete side-by-side view
+      </div>
+    </div>
+
+    <div class="sandbox-col">
+      <div class="sandbox-col-title">📋 All 7 Layers — Sender Summary</div>
+      <div class="sandbox-output-scroll" id="sandbox-output" aria-live="polite"></div>
+    </div>
+
+  </aside>
+
+  <!-- =========================================================
+       FULL JOURNEY OVERLAY (NEW) ★
+       Side-by-side: Sender (L7→L1) | Wire | Receiver (L1→L7)
+       Shows the actual message transformation at every layer
+       ========================================================= -->
+  <div id="full-journey-overlay" role="dialog" aria-modal="true" aria-label="Full OSI Journey View">
+
+    <div id="fjo-panel">
+
+      <!-- Overlay Header -->
+      <div id="fjo-header">
+        <div class="fjo-header-left">
+          <span class="fjo-header-icon">🌐</span>
+          <div>
+            <div class="fjo-header-title">Complete OSI Journey</div>
+            <div class="fjo-header-msg">Message: <span id="fjo-message-display" class="fjo-msg-value">"Hello, World!"</span></div>
+          </div>
+        </div>
+        <button id="btn-close-journey" aria-label="Close full journey view" title="Esc to close">✕ Close</button>
+      </div>
+
+      <!-- Three-column layout: Sender | Wire | Receiver -->
+      <div id="fjo-body">
+
+        <!-- SENDER COLUMN -->
+        <div class="fjo-col" id="fjo-sender-col">
+          <div class="fjo-col-title sender">
+            <span class="fjo-col-icon">📤</span>
+            <div>
+              <div class="fjo-col-name">SENDER</div>
+              <div class="fjo-col-sub">Your Computer — Encapsulation (7→1)</div>
+            </div>
+          </div>
+          <div class="fjo-layers-scroll" id="fjo-sender-layers">
+            <!-- Injected by openFullJourney() -->
+          </div>
+        </div>
+
+        <!-- WIRE / NETWORK -->
+        <div class="fjo-wire" id="fjo-wire-col">
+          <div class="fjo-wire-label">🌐 Network</div>
+          <div class="fjo-wire-visual">
+            <div class="wire-line"></div>
+            <div class="wire-packet" id="wire-packet">📦</div>
+            <div class="wire-line"></div>
+          </div>
+          <div class="fjo-wire-info">
+            <div class="wire-info-item">📡 Physical Medium</div>
+            <div class="wire-info-item">⚡ Electrical Signals</div>
+            <div class="wire-info-item">🔢 01001000 01100101…</div>
+            <div class="wire-info-item">⏱ ~15ms (LAN)</div>
+          </div>
+        </div>
+
+        <!-- RECEIVER COLUMN -->
+        <div class="fjo-col" id="fjo-receiver-col">
+          <div class="fjo-col-title receiver">
+            <span class="fjo-col-icon">📥</span>
+            <div>
+              <div class="fjo-col-name">RECEIVER</div>
+              <div class="fjo-col-sub">Destination Server — Decapsulation (1→7)</div>
+            </div>
+          </div>
+          <div class="fjo-layers-scroll" id="fjo-receiver-layers">
+            <!-- Injected by openFullJourney() -->
+          </div>
+        </div>
+
+      </div><!-- #fjo-body -->
+
+    </div><!-- #fjo-panel -->
+
+  </div><!-- #full-journey-overlay -->
+
+  <script src="script.js"></script>
+
+</body>
+</html>
